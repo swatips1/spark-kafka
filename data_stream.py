@@ -3,6 +3,7 @@ import json
 from pyspark.sql import SparkSession
 from pyspark.sql.types import *
 import pyspark.sql.functions as psf
+import time
 
 
 """Schema for incoming resources"""
@@ -32,86 +33,99 @@ def run_spark_job(spark):
     df = spark \
         .readStream \
         .format("kafka") \
-        .option("kafka.bootstrap.servers", "localhost:9093") \
+        .option("kafka.bootstrap.servers", "localhost:9092") \
         .option("subscribe", "service.calls") \
-        .option("spark.streaming.ui.retainedBatches","100000")\
-        .option("spark.streaming.ui.retainedStages","100000")\
+        .option("startingOffsets", "earliest") \
+        .option("spark.streaming.ui.retainedBatches","100")\
+        .option("spark.streaming.ui.retainedStages","100")\
         .option("stopGracefullyOnShutdown", "true") \
         .load()
-#         .option("autoBroadcastJoinThreshold", "10000")\
-#         .option("spark.sql.shuffle.partitions", 1000)\
-#         .option("stopGracefullyOnShutdown", "true") \
-#         .load()
-
-#     df = spark \
-#         .readStream \
-#         .format("kafka") \
-#         .option("kafka.bootstrap.servers", "localhost:9093") \
-#         .option("subscribe", "service.calls") \
-#         #.option("spark.streaming.ui.retainedBatches","1000")\
-#         #.option("startingOffsets", "earliest") \
-#         #.option("maxOffsetsPerTrigger", 200) \
-#         #.option("maxRatePerPartition", 1000)\
-#         #.option("spark.sql.inMemoryColumnarStorage.batchSize", 100000)\
-#         #.option("spark.sql.shuffle.partitions", 1000)\
-#         .option("stopGracefullyOnShutdown", "true") \
-#         .load()
     
     """What does the schema look like?"""
-    df.printSchema()
 
+    print("***********+++++Schema Def+++++*************")
+    df.printSchema()
+    print("***********+++++Schema Def+++++*************")
+    
     """ Process inputs
     # Extract the correct column from the kafka input resources
     # Take only value and convert it to String
     """
+    print("***********+++++df+++++*************")
+    print(df)
+    print("******************************")
+    
     kafka_df = df.selectExpr("CAST(value AS STRING)")
 
+    print("***********+++++kafka_df+++++*************")
+    print(kafka_df)
+    print("******************************")
+    
     service_table = kafka_df\
         .select(psf.from_json(psf.col('value'), schema).alias("DF"))\
         .select("DF.*")
-
-    """select original_crime_type_name and disposition"""
-    distinct_table = service_table.select('original_crime_type_name',
-                                          'disposition','call_date_time').distinct()
-
+    
+    print("***********+++++service_table+++++*************")
+    print(service_table)
+    print("******************************")
+    
+    distinct_table = service_table \
+        .select('original_crime_type_name', 'disposition', 'call_date_time') \
+        .distinct() \
+        .withWatermark('call_date_time', "1 minute")
+    
+    print("***********+++++distinct_table+++++*************")
+    print(distinct_table)
+    print("******************************")
+    
     """ How many distinct types of crimes can we find?"""
-    agg_df =  distinct_table \
-        .dropna() \
-        .select('original_crime_type_name') \
-        .groupby('original_crime_type_name') \
-        .agg({'original_crime_type_name':'count'})
+    
+    agg_df = distinct_table\
+        .select(psf.col("original_crime_type_name"), psf.col("call_date_time"), psf.col("disposition"))\
+        .withWatermark("call_date_time", "60 minutes")\
+        .groupBy(psf.window(distinct_table.call_date_time, "10 minutes", "5 minutes"),
+                 psf.col("original_crime_type_name")).count()
+    
+    print("***********+++++distinct_table+++++*************")
+    print(agg_df)
+    print("******************************")
+
 
     """Write output stream"""
     query = agg_df \
-        .writeStream \
-        .format('console') \
-        .outputMode('Complete') \
-        .trigger(processingTime="15 seconds")\
-        .start()
-
-    query.awaitTermination()
-
+            .writeStream \
+            .format('console') \
+            .outputMode('complete') \
+            .trigger(processingTime="30 seconds") \
+            .option("truncate", "false") \
+            .start()
+    
     """Get the right radio code json path"""
+    time.sleep(30)
+    query.awaitTermination()
+    
     radio_code_json_filepath = "radio_code.json"
-    radio_code_df = spark.read.json(radio_code_json_filepath)
+    radio_code_df = spark.read.json(radio_code_json_filepath, multiLine=True )
 
     """Clean the data to match the column names with radio radio_code_df and agg_df
-    to facilitate oin on the disposition code"""
+     to facilitate oin on the disposition code"""
 
     """Rename disposition_code column to disposition"""
     radio_code_df = radio_code_df.withColumnRenamed("disposition_code", "disposition")
 
     """Join on disposition column"""
-    join_query = agg_df.join(radio_code_df, col('agg_df.disposition') == col("radio_code_df.disposition"),  "inner")
     
+    join_query = agg_df \
+        .join(radio_code_df, col('agg_df.disposition') == col('radio_code_df.disposition'), 'left_outer')
 
+    time.sleep(30)
     join_query.awaitTermination()
 
 
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
-    # TODO Create Spark in Standalone mode
+    """Create Spark in Standalone mode"""
     spark = SparkSession \
         .builder \
         .master("local[*]") \
@@ -120,7 +134,7 @@ if __name__ == "__main__":
         .getOrCreate()
 
     logger.info("Spark started")
-
+    print("Running job now...")
     run_spark_job(spark)
-
+    print("Ending job now...")
     spark.stop()
