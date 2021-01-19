@@ -36,8 +36,9 @@ def run_spark_job(spark):
         .option("kafka.bootstrap.servers", "localhost:9092") \
         .option("subscribe", "service.calls") \
         .option("startingOffsets", "earliest") \
-        .option("spark.streaming.ui.retainedBatches","100")\
-        .option("spark.streaming.ui.retainedStages","100")\
+        .option("maxRatePerPartition","100")\
+        .option("spark.streaming.ui.retainedBatches","10000")\
+        .option("spark.streaming.ui.retainedStages","10000")\
         .option("stopGracefullyOnShutdown", "true") \
         .load()
     
@@ -51,32 +52,15 @@ def run_spark_job(spark):
     # Extract the correct column from the kafka input resources
     # Take only value and convert it to String
     """
-    print("***********+++++df+++++*************")
-    print(df)
-    print("******************************")
-    
     kafka_df = df.selectExpr("CAST(value AS STRING)")
-
-    print("***********+++++kafka_df+++++*************")
-    print(kafka_df)
-    print("******************************")
-    
     service_table = kafka_df\
         .select(psf.from_json(psf.col('value'), schema).alias("DF"))\
         .select("DF.*")
-    
-    print("***********+++++service_table+++++*************")
-    print(service_table)
-    print("******************************")
     
     distinct_table = service_table \
         .select('original_crime_type_name', 'disposition', 'call_date_time') \
         .distinct() \
         .withWatermark('call_date_time', "1 minute")
-    
-    print("***********+++++distinct_table+++++*************")
-    print(distinct_table)
-    print("******************************")
     
     """ How many distinct types of crimes can we find?"""
     
@@ -86,11 +70,6 @@ def run_spark_job(spark):
         .groupBy(psf.window(distinct_table.call_date_time, "10 minutes", "5 minutes"),
                  psf.col("original_crime_type_name")).count()
     
-    print("***********+++++distinct_table+++++*************")
-    print(agg_df)
-    print("******************************")
-
-
     """Write output stream"""
     query = agg_df \
             .writeStream \
@@ -99,11 +78,12 @@ def run_spark_job(spark):
             .trigger(processingTime="30 seconds") \
             .option("truncate", "false") \
             .start()
-    
-    """Get the right radio code json path"""
+        
     time.sleep(30)
     query.awaitTermination()
     
+    """Get the right radio code json path"""
+
     radio_code_json_filepath = "radio_code.json"
     radio_code_df = spark.read.json(radio_code_json_filepath, multiLine=True )
 
