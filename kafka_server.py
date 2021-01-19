@@ -9,7 +9,7 @@ def run_kafka_server():
     producer = producer_server.ProducerServer(
         input_file=input_file,
         topic="service.calls",
-        bootstrap_servers="localhost:9093",
+        bootstrap_servers="localhost:9092",
         client_id="sf.crime.data.analyzer"
     )
 
